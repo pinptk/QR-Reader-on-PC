@@ -66,7 +66,7 @@
   }
   label.check select { flex: none; padding: 4px 8px; }
   .gen-image { display: grid; place-items: center; margin-bottom: 12px; }
-  .gen-image img { width: min(100%, 280px); height: auto; image-rendering: pixelated; border-radius: 4px; }
+  .gen-image canvas { width: min(100%, 280px); height: auto; image-rendering: pixelated; border-radius: 4px; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -126,8 +126,12 @@
         </select>
       </label>
     </div>
+    <div class="controls">
+      <label class="check"><input type="checkbox" id="genAnimate" checked> 貼り付けたときに1文字ずつ組み立てるアニメーション</label>
+      <label class="check"><input type="checkbox" id="genAnimateOnOption"> サイズ・誤り訂正レベルの変更時もアニメーション</label>
+    </div>
     <div id="genOutput" hidden>
-      <div class="gen-image"><img id="genImage" alt="生成したQRコード"></div>
+      <div class="gen-image"><canvas id="genCanvas" role="img" aria-label="生成したQRコード"></canvas></div>
       <div class="actions">
         <button id="genDownload" class="primary">PNGで保存</button>
         <button id="genCopy">画像をコピー</button>
@@ -154,6 +158,7 @@
   const resultCard = $('resultCard'), resultText = $('resultText');
   const copyBtn = $('copyBtn'), openBtn = $('openBtn'), toast = $('toast');
   const autoCopy = $('autoCopy'), mirror = $('mirror');
+  const genAnimate = $('genAnimate'), genAnimateOnOption = $('genAnimateOnOption');
   const historyEl = $('history'), historyEmpty = $('historyEmpty');
 
   const canvas = document.createElement('canvas');
@@ -175,8 +180,12 @@
   const settings = loadJSON(SETTINGS_KEY, {});
   if (typeof settings.autoCopy === 'boolean') autoCopy.checked = settings.autoCopy;
   if (typeof settings.mirror === 'boolean') mirror.checked = settings.mirror;
+  if (typeof settings.genAnimate === 'boolean') genAnimate.checked = settings.genAnimate;
+  if (typeof settings.genAnimateOnOption === 'boolean') genAnimateOnOption.checked = settings.genAnimateOnOption;
   const persistSettings = () => saveJSON(SETTINGS_KEY, {
-    autoCopy: autoCopy.checked, mirror: mirror.checked, deviceId: cameraSel.value || settings.deviceId,
+    autoCopy: autoCopy.checked, mirror: mirror.checked,
+    genAnimate: genAnimate.checked, genAnimateOnOption: genAnimateOnOption.checked,
+    deviceId: cameraSel.value || settings.deviceId,
   });
   autoCopy.addEventListener('change', persistSettings);
   mirror.addEventListener('change', () => { applyMirror(); persistSettings(); });
@@ -404,12 +413,21 @@
 
   // ---- QRコード生成 ----
   const genInput = $('genInput'), genSize = $('genSize'), genLevel = $('genLevel');
-  const genOutput = $('genOutput'), genImage = $('genImage'), genMessage = $('genMessage');
+  const genOutput = $('genOutput'), genCanvas = $('genCanvas'), genMessage = $('genMessage');
   const genToast = $('genToast');
-  const genCanvas = document.createElement('canvas');
-  let genTimer = null;
+  // アニメーション: 最大 50 コマ・全体で約 1.5 秒（1コマ 30〜80ms）
+  const ANIM_MAX_FRAMES = 50, ANIM_DURATION_MS = 1500, ANIM_MIN_STEP_MS = 30, ANIM_MAX_STEP_MS = 80;
+  let genTimer = null, animTimer = null, finalQR = null;
 
-  function generateQR() {
+  function makeQR(text) {
+    const qr = qrcode(0, genLevel.value); // 0 = 文字数に合わせて自動でバージョン選択
+    qr.addData(text);
+    qr.make();
+    return qr;
+  }
+
+  function generateQR(animate = false) {
+    stopAnimation();
     const text = genInput.value;
     genMessage.textContent = '';
     if (!text) { genOutput.hidden = true; return; }
@@ -418,16 +436,41 @@
       return;
     }
     qrcode.stringToBytes = qrcode.stringToBytesFuncs['UTF-8']; // 日本語を正しく扱う
-    let qr;
     try {
-      qr = qrcode(0, genLevel.value); // 0 = 文字数に合わせて自動でバージョン選択
-      qr.addData(text);
-      qr.make();
+      finalQR = makeQR(text);
     } catch {
       genOutput.hidden = true;
       genMessage.textContent = '文字列が長すぎてQRコードにできません。短くするか、誤り訂正レベルを下げてください。';
       return;
     }
+    genOutput.hidden = false;
+    if (animate) animateQR(Array.from(text)); // Array.from で絵文字などを分断しない
+    else drawQR(finalQR);
+  }
+
+  // 先頭から1文字ずつ読み込んだ途中の文字列で QR コードを描き、最後に完成形を描く。
+  // 長い文字列はコマ数を抑えるため、1コマで複数文字進める。
+  function animateQR(chars) {
+    const frames = Math.min(chars.length, ANIM_MAX_FRAMES);
+    const delay = Math.min(ANIM_MAX_STEP_MS, Math.max(ANIM_MIN_STEP_MS, ANIM_DURATION_MS / frames));
+    let frame = 0;
+    const step = () => {
+      frame++;
+      if (frame >= frames) { animTimer = null; drawQR(finalQR); return; }
+      drawQR(makeQR(chars.slice(0, Math.round(chars.length * frame / frames)).join('')));
+      animTimer = setTimeout(step, delay);
+    };
+    step();
+  }
+  function stopAnimation() { clearTimeout(animTimer); animTimer = null; }
+  // 保存・コピー時は途中のコマではなく完成形を使う
+  function finishAnimation() {
+    if (!animTimer) return;
+    stopAnimation();
+    drawQR(finalQR);
+  }
+
+  function drawQR(qr) {
     const count = qr.getModuleCount();
     const quiet = 4; // 周囲の余白（規格上 4 モジュール）
     const size = Number(genSize.value);
@@ -443,13 +486,18 @@
         if (qr.isDark(r, c)) g.fillRect((c + quiet) * cell, (r + quiet) * cell, cell, cell);
       }
     }
-    genImage.src = genCanvas.toDataURL('image/png');
-    genOutput.hidden = false;
   }
-  const scheduleGenerate = () => { clearTimeout(genTimer); genTimer = setTimeout(generateQR, 150); };
-  genInput.addEventListener('input', scheduleGenerate);
-  genSize.addEventListener('change', generateQR);
-  genLevel.addEventListener('change', generateQR);
+  // アニメーションは貼り付け時（とサイズ等の変更時）だけ。手で打っているときは即座に完成形を描く
+  genInput.addEventListener('input', (e) => {
+    clearTimeout(genTimer);
+    if (e.inputType === 'insertFromPaste') generateQR(genAnimate.checked);
+    else genTimer = setTimeout(generateQR, 150);
+  });
+  genSize.addEventListener('change', () => generateQR(genAnimateOnOption.checked));
+  genLevel.addEventListener('change', () => generateQR(genAnimateOnOption.checked));
+  for (const el of [genAnimate, genAnimateOnOption]) {
+    el.addEventListener('change', () => { persistSettings(); finishAnimation(); });
+  }
   // ペースト時に読み取りへ回さない（テキスト入力中の貼り付け）
   genInput.addEventListener('paste', (e) => e.stopPropagation());
 
@@ -458,12 +506,14 @@
     setTimeout(() => { genToast.textContent = ''; }, 2500);
   }
   $('genDownload').addEventListener('click', () => {
+    finishAnimation();
     const a = document.createElement('a');
-    a.href = genImage.src;
+    a.href = genCanvas.toDataURL('image/png');
     a.download = 'qrcode.png';
     a.click();
   });
   $('genCopy').addEventListener('click', async () => {
+    finishAnimation();
     try {
       const blob = await new Promise(res => genCanvas.toBlob(res, 'image/png'));
       await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
