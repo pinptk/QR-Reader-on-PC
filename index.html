@@ -60,6 +60,13 @@
   .hint { font-size: .85rem; color: var(--muted); }
   .drop { border: 2px dashed var(--border); border-radius: 8px; padding: 12px; text-align: center; }
   .drop.over { border-color: var(--accent); }
+  textarea {
+    width: 100%; font: inherit; padding: 8px 12px; border-radius: 8px; resize: vertical;
+    border: 1px solid var(--border); background: var(--card); color: var(--fg); margin-bottom: 8px;
+  }
+  label.check select { flex: none; padding: 4px 8px; }
+  .gen-image { display: grid; place-items: center; margin-bottom: 12px; }
+  .gen-image img { width: min(100%, 280px); height: auto; image-rendering: pixelated; border-radius: 4px; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -100,6 +107,37 @@
   </section>
 
   <section class="card">
+    <h2>QRコードを作る</h2>
+    <textarea id="genInput" rows="3" placeholder="QRコードにしたい文字列やURLを入力"></textarea>
+    <div class="controls">
+      <label class="check">サイズ
+        <select id="genSize">
+          <option value="256">小</option>
+          <option value="512" selected>中</option>
+          <option value="1024">大</option>
+        </select>
+      </label>
+      <label class="check">誤り訂正
+        <select id="genLevel">
+          <option value="L">L（7%）</option>
+          <option value="M" selected>M（15%）</option>
+          <option value="Q">Q（25%）</option>
+          <option value="H">H（30%）</option>
+        </select>
+      </label>
+    </div>
+    <div id="genOutput" hidden>
+      <div class="gen-image"><img id="genImage" alt="生成したQRコード"></div>
+      <div class="actions">
+        <button id="genDownload" class="primary">PNGで保存</button>
+        <button id="genCopy">画像をコピー</button>
+        <span class="toast" id="genToast"></span>
+      </div>
+    </div>
+    <p class="hint" id="genMessage"></p>
+  </section>
+
+  <section class="card">
     <h2>履歴 <button id="clearHistory">履歴を消去</button></h2>
     <ul class="history" id="history"></ul>
     <p class="hint" id="historyEmpty">まだ履歴はありません</p>
@@ -107,6 +145,7 @@
 </main>
 
 <script src="vendor/jsQR.js"></script>
+<script src="vendor/qrcode-generator.js"></script>
 <script>
 (() => {
   const $ = (id) => document.getElementById(id);
@@ -361,6 +400,77 @@
   document.addEventListener('paste', (e) => {
     const item = [...(e.clipboardData?.items || [])].find(i => i.type.startsWith('image/'));
     if (item) decodeImageFile(item.getAsFile());
+  });
+
+  // ---- QRコード生成 ----
+  const genInput = $('genInput'), genSize = $('genSize'), genLevel = $('genLevel');
+  const genOutput = $('genOutput'), genImage = $('genImage'), genMessage = $('genMessage');
+  const genToast = $('genToast');
+  const genCanvas = document.createElement('canvas');
+  let genTimer = null;
+
+  function generateQR() {
+    const text = genInput.value;
+    genMessage.textContent = '';
+    if (!text) { genOutput.hidden = true; return; }
+    if (typeof qrcode !== 'function') {
+      genMessage.textContent = 'vendor/qrcode-generator.js が読み込めませんでした。';
+      return;
+    }
+    qrcode.stringToBytes = qrcode.stringToBytesFuncs['UTF-8']; // 日本語を正しく扱う
+    let qr;
+    try {
+      qr = qrcode(0, genLevel.value); // 0 = 文字数に合わせて自動でバージョン選択
+      qr.addData(text);
+      qr.make();
+    } catch {
+      genOutput.hidden = true;
+      genMessage.textContent = '文字列が長すぎてQRコードにできません。短くするか、誤り訂正レベルを下げてください。';
+      return;
+    }
+    const count = qr.getModuleCount();
+    const quiet = 4; // 周囲の余白（規格上 4 モジュール）
+    const size = Number(genSize.value);
+    const cell = Math.max(1, Math.floor(size / (count + quiet * 2)));
+    const total = cell * (count + quiet * 2);
+    genCanvas.width = genCanvas.height = total;
+    const g = genCanvas.getContext('2d');
+    g.fillStyle = '#ffffff';
+    g.fillRect(0, 0, total, total);
+    g.fillStyle = '#000000';
+    for (let r = 0; r < count; r++) {
+      for (let c = 0; c < count; c++) {
+        if (qr.isDark(r, c)) g.fillRect((c + quiet) * cell, (r + quiet) * cell, cell, cell);
+      }
+    }
+    genImage.src = genCanvas.toDataURL('image/png');
+    genOutput.hidden = false;
+  }
+  const scheduleGenerate = () => { clearTimeout(genTimer); genTimer = setTimeout(generateQR, 150); };
+  genInput.addEventListener('input', scheduleGenerate);
+  genSize.addEventListener('change', generateQR);
+  genLevel.addEventListener('change', generateQR);
+  // ペースト時に読み取りへ回さない（テキスト入力中の貼り付け）
+  genInput.addEventListener('paste', (e) => e.stopPropagation());
+
+  function genFlash(msg) {
+    genToast.textContent = msg;
+    setTimeout(() => { genToast.textContent = ''; }, 2500);
+  }
+  $('genDownload').addEventListener('click', () => {
+    const a = document.createElement('a');
+    a.href = genImage.src;
+    a.download = 'qrcode.png';
+    a.click();
+  });
+  $('genCopy').addEventListener('click', async () => {
+    try {
+      const blob = await new Promise(res => genCanvas.toBlob(res, 'image/png'));
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+      genFlash('画像をクリップボードにコピーしました');
+    } catch {
+      genFlash('このブラウザでは画像をコピーできません。「PNGで保存」を使ってください');
+    }
   });
 
   // ---- 起動 ----

@@ -9,6 +9,7 @@ PC のカメラで QR コードを読み取るブラウザ用ツールです。�
 - 内容が `http://` / `https://` の URL なら「URLを開く」ボタンを表示（勝手には開きません）
 - 画像ファイルのドロップや、Ctrl+V でのスクリーンショット貼り付けからも読み取り可能
 - 読み取り履歴（最新 50 件、ブラウザ内にだけ保存）
+- 入力した文字列から QR コード画像を作成（日本語対応。PNG で保存、または画像としてコピー）
 
 ## 使い方
 
@@ -24,3 +25,4 @@ GitHub Pages で公開すれば、URL を開くだけで使えます
 
 - カメラ映像は `getUserMedia` で取得し、解析はすべてブラウザ内で行います。映像や結果を外部に送ることはありません。
 - デコードには、ブラウザが対応していれば `BarcodeDetector` を使い、対応していなければ同梱の [jsQR](https://github.com/cozmo/jsQR)（Apache-2.0, `vendor/`）を使います。
+- QR コードの生成には同梱の [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator)（MIT, `vendor/`）を使います。
