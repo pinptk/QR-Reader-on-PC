@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QR Reader on PC</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --fg: #1d2129; --muted: #6b7280;
+    --border: #dde1e6; --accent: #2563eb; --accent-fg: #ffffff; --ok: #16a34a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a; --card: #1e2127; --fg: #e8eaed; --muted: #9aa0a6;
+      --border: #33373e; --accent: #4f8cff; --accent-fg: #0b0d10; --ok: #4ade80;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font-family: system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Yu Gothic UI", sans-serif;
+  }
+  main { max-width: 720px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 1.3rem; margin: 8px 0 16px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+  select, button {
+    font: inherit; padding: 8px 12px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--card); color: var(--fg);
+  }
+  select { flex: 1 1 200px; min-width: 0; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  label.check { display: inline-flex; gap: 6px; align-items: center; font-size: .9rem; color: var(--muted); }
+  .viewport {
+    position: relative; width: 100%; aspect-ratio: 4 / 3; background: #000;
+    border-radius: 8px; overflow: hidden; display: grid; place-items: center;
+  }
+  .viewport video { width: 100%; height: 100%; object-fit: contain; }
+  .viewport .placeholder { position: absolute; color: #aaa; text-align: center; padding: 16px; font-size: .95rem; }
+  .viewport.hit { outline: 4px solid var(--ok); outline-offset: -4px; }
+  #status { font-size: .85rem; color: var(--muted); margin-top: 8px; min-height: 1.2em; }
+  .result-text {
+    font-family: ui-monospace, Consolas, monospace; white-space: pre-wrap; word-break: break-all;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin: 8px 0 12px;
+    max-height: 240px; overflow: auto;
+  }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+  .toast { color: var(--ok); font-size: .9rem; align-self: center; }
+  h2 { font-size: 1rem; margin: 0 0 8px; display: flex; justify-content: space-between; align-items: center; }
+  ul.history { list-style: none; margin: 0; padding: 0; }
+  ul.history li {
+    display: flex; gap: 8px; align-items: center; padding: 8px 0; border-top: 1px solid var(--border);
+  }
+  ul.history li:first-child { border-top: none; }
+  ul.history .text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .9rem; }
+  ul.history .time { color: var(--muted); font-size: .75rem; white-space: nowrap; }
+  ul.history button { padding: 4px 8px; font-size: .8rem; }
+  .hint { font-size: .85rem; color: var(--muted); }
+  .drop { border: 2px dashed var(--border); border-radius: 8px; padding: 12px; text-align: center; }
+  .drop.over { border-color: var(--accent); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>QR Reader on PC</h1>
+
+  <section class="card">
+    <div class="controls">
+      <button id="toggle" class="primary">カメラを起動</button>
+      <select id="cameras" aria-label="カメラ選択"><option value="">カメラ（起動後に選択可）</option></select>
+      <label class="check"><input type="checkbox" id="autoCopy" checked> 読み取ったら自動でコピー</label>
+      <label class="check"><input type="checkbox" id="mirror"> 左右反転表示</label>
+    </div>
+    <div class="viewport" id="viewport">
+      <video id="video" playsinline muted></video>
+      <div class="placeholder" id="placeholder">「カメラを起動」を押して、QRコードをカメラにかざしてください</div>
+    </div>
+    <div id="status"></div>
+  </section>
+
+  <section class="card" id="resultCard" hidden>
+    <h2>読み取り結果</h2>
+    <div class="result-text" id="resultText"></div>
+    <div class="actions">
+      <button id="copyBtn">コピー</button>
+      <button id="openBtn" class="primary" hidden>URLを開く</button>
+      <span class="toast" id="toast"></span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>画像から読み取る</h2>
+    <div class="drop" id="drop">
+      <p class="hint">画像ファイルをここにドロップ、<b>Ctrl+V</b> でスクリーンショットを貼り付け、または
+        <label><input type="file" id="file" accept="image/*"></label></p>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>履歴 <button id="clearHistory">履歴を消去</button></h2>
+    <ul class="history" id="history"></ul>
+    <p class="hint" id="historyEmpty">まだ履歴はありません</p>
+  </section>
+</main>
+
+<script src="vendor/jsQR.js"></script>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const video = $('video'), viewport = $('viewport'), placeholder = $('placeholder');
+  const toggleBtn = $('toggle'), cameraSel = $('cameras'), statusEl = $('status');
+  const resultCard = $('resultCard'), resultText = $('resultText');
+  const copyBtn = $('copyBtn'), openBtn = $('openBtn'), toast = $('toast');
+  const autoCopy = $('autoCopy'), mirror = $('mirror');
+  const historyEl = $('history'), historyEmpty = $('historyEmpty');
+
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const HISTORY_KEY = 'qr-reader-history';
+  const SETTINGS_KEY = 'qr-reader-settings';
+  const DUP_WINDOW_MS = 3000;
+
+  let stream = null, scanTimer = null, detector = null;
+  let lastText = '', lastTime = 0, currentText = '';
+
+  // ---- 設定の保存（失敗しても動作に影響しない） ----
+  function loadJSON(key, fallback) {
+    try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; }
+  }
+  function saveJSON(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* ignore */ }
+  }
+  const settings = loadJSON(SETTINGS_KEY, {});
+  if (typeof settings.autoCopy === 'boolean') autoCopy.checked = settings.autoCopy;
+  if (typeof settings.mirror === 'boolean') mirror.checked = settings.mirror;
+  const persistSettings = () => saveJSON(SETTINGS_KEY, {
+    autoCopy: autoCopy.checked, mirror: mirror.checked, deviceId: cameraSel.value || settings.deviceId,
+  });
+  autoCopy.addEventListener('change', persistSettings);
+  mirror.addEventListener('change', () => { applyMirror(); persistSettings(); });
+  function applyMirror() { video.style.transform = mirror.checked ? 'scaleX(-1)' : ''; }
+  applyMirror();
+
+  // ---- デコーダ（BarcodeDetector があれば優先、なければ jsQR） ----
+  async function initDetector() {
+    if ('BarcodeDetector' in window) {
+      try {
+        const formats = await BarcodeDetector.getSupportedFormats();
+        if (formats.includes('qr_code')) detector = new BarcodeDetector({ formats: ['qr_code'] });
+      } catch { detector = null; }
+    }
+  }
+
+  async function decodeSource(source, width, height) {
+    if (detector) {
+      try {
+        const codes = await detector.detect(source);
+        if (codes.length) return codes[0].rawValue;
+      } catch { /* jsQR にフォールバック */ }
+    }
+    canvas.width = width; canvas.height = height;
+    ctx.drawImage(source, 0, 0, width, height);
+    const img = ctx.getImageData(0, 0, width, height);
+    const code = jsQR(img.data, width, height, { inversionAttempts: 'attemptBoth' });
+    return code ? code.data : null;
+  }
+
+  // ---- カメラ ----
+  async function listCameras() {
+    const devices = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
+    const current = stream?.getVideoTracks()[0]?.getSettings().deviceId;
+    cameraSel.innerHTML = '';
+    devices.forEach((d, i) => {
+      const opt = document.createElement('option');
+      opt.value = d.deviceId;
+      opt.textContent = d.label || `カメラ ${i + 1}`;
+      if (d.deviceId === current) opt.selected = true;
+      cameraSel.appendChild(opt);
+    });
+  }
+
+  async function startCamera(deviceId) {
+    stopCamera();
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setStatus('このブラウザではカメラを使えません。Chrome / Edge / Firefox の最新版でお試しください。');
+      return;
+    }
+    const video_ = deviceId
+      ? { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
+      : { width: { ideal: 1280 }, height: { ideal: 720 } };
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: video_, audio: false });
+    } catch (e) {
+      if (deviceId) return startCamera(null); // 保存済みカメラが無くなっていた場合
+      setStatus(cameraErrorMessage(e));
+      return;
+    }
+    video.srcObject = stream;
+    await video.play();
+    placeholder.hidden = true;
+    toggleBtn.textContent = 'カメラを停止';
+    toggleBtn.classList.remove('primary');
+    await listCameras();
+    persistSettings();
+    setStatus('読み取り中… QRコードをカメラにかざしてください');
+    scanLoop();
+  }
+
+  function stopCamera() {
+    clearTimeout(scanTimer);
+    scanTimer = null;
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    stream = null;
+    video.srcObject = null;
+    placeholder.hidden = false;
+    toggleBtn.textContent = 'カメラを起動';
+    toggleBtn.classList.add('primary');
+  }
+
+  function cameraErrorMessage(e) {
+    switch (e && e.name) {
+      case 'NotAllowedError': return 'カメラの使用が許可されませんでした。アドレスバーのカメラアイコンから許可してください。';
+      case 'NotFoundError': return 'カメラが見つかりません。接続を確認してください。';
+      case 'NotReadableError': return 'カメラを開けません。他のアプリ（Zoom / Teams など）が使用中かもしれません。';
+      default: return 'カメラを起動できませんでした: ' + (e && e.message || e);
+    }
+  }
+
+  async function scanLoop() {
+    if (!stream) return;
+    if (video.readyState >= 2 && video.videoWidth) {
+      // 処理を軽くするため長辺 800px 程度に縮小して解析
+      const scale = Math.min(1, 800 / Math.max(video.videoWidth, video.videoHeight));
+      const w = Math.round(video.videoWidth * scale), h = Math.round(video.videoHeight * scale);
+      const text = await decodeSource(video, w, h);
+      if (text) handleResult(text);
+    }
+    if (stream) scanTimer = setTimeout(scanLoop, 150);
+  }
+
+  toggleBtn.addEventListener('click', () => stream ? stopCamera() : startCamera(settings.deviceId));
+  cameraSel.addEventListener('change', () => { settings.deviceId = cameraSel.value; startCamera(cameraSel.value); });
+
+  // ---- 結果の処理 ----
+  function isWebUrl(text) {
+    try {
+      const u = new URL(text.trim());
+      return u.protocol === 'http:' || u.protocol === 'https:';
+    } catch { return false; }
+  }
+
+  function handleResult(text) {
+    const now = Date.now();
+    if (text === lastText && now - lastTime < DUP_WINDOW_MS) return;
+    lastText = text; lastTime = now;
+    showResult(text);
+    addHistory(text);
+    viewport.classList.add('hit');
+    setTimeout(() => viewport.classList.remove('hit'), 400);
+    if (autoCopy.checked) copyText(text);
+  }
+
+  function showResult(text) {
+    currentText = text;
+    resultCard.hidden = false;
+    resultText.textContent = text;
+    openBtn.hidden = !isWebUrl(text);
+    toast.textContent = '';
+  }
+
+  async function copyText(text) {
+    let ok = false;
+    try {
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    } catch {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      try { ok = document.execCommand('copy'); } catch { ok = false; }
+      ta.remove();
+    }
+    flash(ok ? 'クリップボードにコピーしました' : 'コピーできませんでした（「コピー」ボタンを押してください）');
+  }
+
+  function openUrl(text) {
+    if (isWebUrl(text)) window.open(text.trim(), '_blank', 'noopener,noreferrer');
+  }
+
+  let toastTimer = null;
+  function flash(msg) {
+    toast.textContent = msg;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { toast.textContent = ''; }, 2500);
+  }
+  function setStatus(msg) { statusEl.textContent = msg; }
+
+  copyBtn.addEventListener('click', () => copyText(currentText));
+  openBtn.addEventListener('click', () => openUrl(currentText));
+
+  // ---- 履歴 ----
+  let history = loadJSON(HISTORY_KEY, []);
+  function addHistory(text) {
+    history = [{ text, time: Date.now() }, ...history.filter(h => h.text !== text)].slice(0, 50);
+    saveJSON(HISTORY_KEY, history);
+    renderHistory();
+  }
+  function renderHistory() {
+    historyEl.innerHTML = '';
+    historyEmpty.hidden = history.length > 0;
+    for (const h of history) {
+      const li = document.createElement('li');
+      const span = document.createElement('span');
+      span.className = 'text'; span.textContent = h.text; span.title = h.text;
+      const time = document.createElement('span');
+      time.className = 'time'; time.textContent = new Date(h.time).toLocaleString('ja-JP');
+      const copy = document.createElement('button');
+      copy.textContent = 'コピー';
+      copy.addEventListener('click', () => { showResult(h.text); copyText(h.text); });
+      li.append(span, time, copy);
+      if (isWebUrl(h.text)) {
+        const open = document.createElement('button');
+        open.textContent = '開く';
+        open.addEventListener('click', () => openUrl(h.text));
+        li.append(open);
+      }
+      historyEl.appendChild(li);
+    }
+  }
+  $('clearHistory').addEventListener('click', () => {
+    if (!history.length || !confirm('履歴をすべて消去しますか？')) return;
+    history = []; saveJSON(HISTORY_KEY, history); renderHistory();
+  });
+
+  // ---- 画像から読み取り ----
+  async function decodeImageFile(file) {
+    if (!file || !file.type.startsWith('image/')) return;
+    try {
+      const bmp = await createImageBitmap(file);
+      const scale = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
+      const text = await decodeSource(bmp, Math.round(bmp.width * scale), Math.round(bmp.height * scale));
+      if (text) { lastText = ''; handleResult(text); setStatus('画像から読み取りました'); }
+      else setStatus('画像からQRコードが見つかりませんでした');
+    } catch (e) {
+      setStatus('画像を読み込めませんでした: ' + e.message);
+    }
+  }
+  $('file').addEventListener('change', (e) => { decodeImageFile(e.target.files[0]); e.target.value = ''; });
+  const drop = $('drop');
+  drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('over'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+  drop.addEventListener('drop', (e) => {
+    e.preventDefault(); drop.classList.remove('over');
+    decodeImageFile(e.dataTransfer.files[0]);
+  });
+  document.addEventListener('paste', (e) => {
+    const item = [...(e.clipboardData?.items || [])].find(i => i.type.startsWith('image/'));
+    if (item) decodeImageFile(item.getAsFile());
+  });
+
+  // ---- 起動 ----
+  renderHistory();
+  initDetector();
+  if (typeof jsQR !== 'function') setStatus('vendor/jsQR.js が読み込めませんでした。フォルダごと配置してください。');
+  window.addEventListener('pagehide', stopCamera);
+})();
+</script>
+</body>
+</html>
