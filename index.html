@@ -54,6 +54,7 @@
     display: flex; gap: 8px; align-items: center; padding: 8px 0; border-top: 1px solid var(--border);
   }
   ul.history li:first-child { border-top: none; }
+  ul.history .pick { flex: 1; min-width: 0; display: flex; gap: 8px; align-items: center; cursor: pointer; user-select: none; }
   ul.history .text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .9rem; }
   ul.history .time { color: var(--muted); font-size: .75rem; white-space: nowrap; }
   ul.history button { padding: 4px 8px; font-size: .8rem; }
@@ -65,6 +66,14 @@
     border: 1px solid var(--border); background: var(--card); color: var(--fg); margin-bottom: 8px;
   }
   label.check select { flex: none; padding: 4px 8px; }
+  input[type="number"] {
+    width: 6em; font: inherit; padding: 4px 8px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--card); color: var(--fg);
+  }
+  .pager { display: flex; gap: 8px; align-items: center; justify-content: center; margin-bottom: 12px; }
+  .pager span { font-size: .9rem; color: var(--muted); text-align: center; min-width: 9em; }
+  .history-tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .history-tools button { padding: 4px 8px; font-size: .85rem; }
   .gen-image { display: grid; place-items: center; margin-bottom: 12px; }
   .gen-image canvas { width: min(100%, 280px); height: auto; image-rendering: pixelated; border-radius: 4px; }
   [hidden] { display: none !important; }
@@ -130,7 +139,16 @@
       <label class="check"><input type="checkbox" id="genAnimate" checked> 貼り付けたときに1文字ずつ組み立てるアニメーション</label>
       <label class="check"><input type="checkbox" id="genAnimateOnOption"> サイズ・誤り訂正レベルの変更時もアニメーション</label>
     </div>
+    <div class="controls">
+      <label class="check"><input type="checkbox" id="genSplit"> 長い文字列を分割する</label>
+      <label class="check"><input type="number" id="genChunk" min="1" step="1" value="500" aria-label="1枚あたりの文字数"> 文字ごと</label>
+    </div>
     <div id="genOutput" hidden>
+      <div class="pager" id="genPager" hidden>
+        <button id="genPrev" title="← キーでも戻れます">← 前へ</button>
+        <span id="genPage"></span>
+        <button id="genNext" class="primary" title="→ キーでも進めます">次へ →</button>
+      </div>
       <div class="gen-image"><canvas id="genCanvas" role="img" aria-label="生成したQRコード"></canvas></div>
       <div class="actions">
         <button id="genDownload" class="primary">PNGで保存</button>
@@ -143,6 +161,11 @@
 
   <section class="card">
     <h2>履歴 <button id="clearHistory">履歴を消去</button></h2>
+    <div class="history-tools" id="historyTools" hidden>
+      <button id="joinCopy" class="primary" disabled>選択した項目を結合してコピー</button>
+      <button id="selectAll">すべて選択</button>
+      <span class="hint">読み取った順に結合します（Shift+クリックで範囲選択）</span>
+    </div>
     <ul class="history" id="history"></ul>
     <p class="hint" id="historyEmpty">まだ履歴はありません</p>
   </section>
@@ -159,6 +182,7 @@
   const copyBtn = $('copyBtn'), openBtn = $('openBtn'), toast = $('toast');
   const autoCopy = $('autoCopy'), mirror = $('mirror');
   const genAnimate = $('genAnimate'), genAnimateOnOption = $('genAnimateOnOption');
+  const genSplit = $('genSplit'), genChunk = $('genChunk');
   const historyEl = $('history'), historyEmpty = $('historyEmpty');
 
   const canvas = document.createElement('canvas');
@@ -182,9 +206,12 @@
   if (typeof settings.mirror === 'boolean') mirror.checked = settings.mirror;
   if (typeof settings.genAnimate === 'boolean') genAnimate.checked = settings.genAnimate;
   if (typeof settings.genAnimateOnOption === 'boolean') genAnimateOnOption.checked = settings.genAnimateOnOption;
+  if (typeof settings.genSplit === 'boolean') genSplit.checked = settings.genSplit;
+  if (Number.isInteger(settings.genChunk) && settings.genChunk > 0) genChunk.value = settings.genChunk;
   const persistSettings = () => saveJSON(SETTINGS_KEY, {
     autoCopy: autoCopy.checked, mirror: mirror.checked,
     genAnimate: genAnimate.checked, genAnimateOnOption: genAnimateOnOption.checked,
+    genSplit: genSplit.checked, genChunk: chunkSize(),
     deviceId: cameraSel.value || settings.deviceId,
   });
   autoCopy.addEventListener('change', persistSettings);
@@ -352,25 +379,42 @@
   openBtn.addEventListener('click', () => openUrl(currentText));
 
   // ---- 履歴 ----
+  const HISTORY_MAX = 100;
+  const joinCopyBtn = $('joinCopy'), selectAllBtn = $('selectAll'), historyTools = $('historyTools');
   let history = loadJSON(HISTORY_KEY, []);
+  let selected = new Set(); // 選択中の履歴エントリ（オブジェクトそのもの）
+  let lastPicked = -1, shiftHeld = false;
+  // チェックボックスの change イベントには shiftKey が無いので、直前の操作から拾う
+  for (const type of ['pointerdown', 'keydown']) {
+    document.addEventListener(type, (e) => { shiftHeld = e.shiftKey; }, true);
+  }
+
   function addHistory(text) {
-    history = [{ text, time: Date.now() }, ...history.filter(h => h.text !== text)].slice(0, 50);
+    history = [{ text, time: Date.now() }, ...history.filter(h => h.text !== text)].slice(0, HISTORY_MAX);
     saveJSON(HISTORY_KEY, history);
     renderHistory();
   }
   function renderHistory() {
+    selected = new Set(history.filter(h => selected.has(h)));
     historyEl.innerHTML = '';
     historyEmpty.hidden = history.length > 0;
-    for (const h of history) {
+    historyTools.hidden = history.length === 0;
+    history.forEach((h, i) => {
       const li = document.createElement('li');
+      const pick = document.createElement('label');
+      pick.className = 'pick';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox'; cb.checked = selected.has(h);
+      cb.addEventListener('change', () => pickHistory(i, cb.checked));
       const span = document.createElement('span');
       span.className = 'text'; span.textContent = h.text; span.title = h.text;
+      pick.append(cb, span);
       const time = document.createElement('span');
       time.className = 'time'; time.textContent = new Date(h.time).toLocaleString('ja-JP');
       const copy = document.createElement('button');
       copy.textContent = 'コピー';
       copy.addEventListener('click', () => { showResult(h.text); copyText(h.text); });
-      li.append(span, time, copy);
+      li.append(pick, time, copy);
       if (isWebUrl(h.text)) {
         const open = document.createElement('button');
         open.textContent = '開く';
@@ -378,11 +422,44 @@
         li.append(open);
       }
       historyEl.appendChild(li);
-    }
+    });
+    updateHistoryTools();
   }
+  // Shift を押しながらなら、前回クリックした項目からの範囲をまとめて同じ状態にする
+  function pickHistory(index, checked) {
+    const from = shiftHeld && lastPicked >= 0 ? Math.min(lastPicked, index) : index;
+    const to = shiftHeld && lastPicked >= 0 ? Math.max(lastPicked, index) : index;
+    for (let i = from; i <= to; i++) {
+      if (checked) selected.add(history[i]); else selected.delete(history[i]);
+    }
+    lastPicked = index;
+    if (from !== to) renderHistory(); else updateHistoryTools();
+  }
+  function updateHistoryTools() {
+    const n = selected.size;
+    joinCopyBtn.disabled = n === 0;
+    joinCopyBtn.textContent = n ? `選択した ${n} 件を結合してコピー` : '選択した項目を結合してコピー';
+    selectAllBtn.textContent = n && n === history.length ? '選択を解除' : 'すべて選択';
+  }
+  selectAllBtn.addEventListener('click', () => {
+    selected = selected.size === history.length ? new Set() : new Set(history);
+    lastPicked = -1;
+    renderHistory();
+  });
+  // 履歴は新しい順に並んでいるので、読み取った時刻の古い順に並べ直してから繋げる
+  joinCopyBtn.addEventListener('click', () => {
+    const joined = history.filter(h => selected.has(h))
+      .sort((a, b) => a.time - b.time)
+      .map(h => h.text).join('');
+    if (!joined) return;
+    showResult(joined);
+    copyText(joined);
+    resultCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  });
   $('clearHistory').addEventListener('click', () => {
     if (!history.length || !confirm('履歴をすべて消去しますか？')) return;
-    history = []; saveJSON(HISTORY_KEY, history); renderHistory();
+    history = []; selected = new Set(); lastPicked = -1;
+    saveJSON(HISTORY_KEY, history); renderHistory();
   });
 
   // ---- 画像から読み取り ----
@@ -414,10 +491,27 @@
   // ---- QRコード生成 ----
   const genInput = $('genInput'), genSize = $('genSize'), genLevel = $('genLevel');
   const genOutput = $('genOutput'), genCanvas = $('genCanvas'), genMessage = $('genMessage');
-  const genToast = $('genToast');
+  const genToast = $('genToast'), genPager = $('genPager'), genPage = $('genPage');
+  const genPrev = $('genPrev'), genNext = $('genNext');
   // アニメーション: 最大 50 コマ・全体で約 1.5 秒（1コマ 30〜80ms）
   const ANIM_MAX_FRAMES = 50, ANIM_DURATION_MS = 1500, ANIM_MIN_STEP_MS = 30, ANIM_MAX_STEP_MS = 80;
+  const MAX_PARTS = 50; // 分割しすぎると読み取りも履歴の管理も大変なので上限を設ける
   let genTimer = null, animTimer = null, finalQR = null;
+  let parts = [], partQRs = [], page = 0; // 分割した文字列（文字の配列）と各QR、表示中の番号
+
+  function chunkSize() {
+    const n = Math.floor(Number(genChunk.value));
+    return n > 0 ? n : 500;
+  }
+  // Array.from で文字単位に分ける（絵文字やサロゲートペアを途中で切らない）
+  function splitText(text) {
+    const chars = Array.from(text);
+    const n = chunkSize();
+    if (!genSplit.checked || chars.length <= n) return [chars];
+    const out = [];
+    for (let i = 0; i < chars.length; i += n) out.push(chars.slice(i, i + n));
+    return out;
+  }
 
   function makeQR(text) {
     const qr = qrcode(0, genLevel.value); // 0 = 文字数に合わせて自動でバージョン選択
@@ -436,17 +530,56 @@
       return;
     }
     qrcode.stringToBytes = qrcode.stringToBytesFuncs['UTF-8']; // 日本語を正しく扱う
-    try {
-      finalQR = makeQR(text);
-    } catch {
+    const split = splitText(text);
+    if (split.length > MAX_PARTS) {
       genOutput.hidden = true;
-      genMessage.textContent = '文字列が長すぎてQRコードにできません。短くするか、誤り訂正レベルを下げてください。';
+      genMessage.textContent = `分割すると ${split.length} 枚になります（上限 ${MAX_PARTS} 枚）。1枚あたりの文字数を増やしてください。`;
       return;
     }
+    try {
+      partQRs = split.map(chars => makeQR(chars.join('')));
+    } catch {
+      genOutput.hidden = true;
+      genMessage.textContent = genSplit.checked
+        ? '1枚あたりの文字数が多すぎてQRコードにできません。文字数を減らすか、誤り訂正レベルを下げてください。'
+        : '文字列が長すぎてQRコードにできません。「長い文字列を分割する」を使うか、誤り訂正レベルを下げてください。';
+      return;
+    }
+    parts = split;
+    page = Math.min(page, parts.length - 1);
+    finalQR = partQRs[page];
     genOutput.hidden = false;
-    if (animate) animateQR(Array.from(text)); // Array.from で絵文字などを分断しない
+    updatePager();
+    if (animate) animateQR(parts[page]);
     else drawQR(finalQR);
   }
+
+  function updatePager() {
+    genPager.hidden = parts.length <= 1;
+    if (genPager.hidden) return;
+    const start = parts.slice(0, page).reduce((sum, p) => sum + p.length, 0);
+    genPage.textContent = `${page + 1} / ${parts.length}（${start + 1}〜${start + parts[page].length}文字目）`;
+    genPrev.disabled = page === 0;
+    genNext.disabled = page === parts.length - 1;
+  }
+  function showPage(next) {
+    if (next < 0 || next >= parts.length) return;
+    stopAnimation();
+    page = next;
+    finalQR = partQRs[page];
+    drawQR(finalQR);
+    updatePager();
+  }
+  genPrev.addEventListener('click', () => showPage(page - 1));
+  genNext.addEventListener('click', () => showPage(page + 1));
+  // キーボードの ← / → でも切り替え（文字入力中のカーソル移動や Alt+← の「戻る」は邪魔しない）
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    if (genOutput.hidden || genPager.hidden || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    if (e.target.closest?.('textarea, select, input:not([type="checkbox"])') || e.target.isContentEditable) return;
+    e.preventDefault();
+    showPage(page + (e.key === 'ArrowRight' ? 1 : -1));
+  });
 
   // 先頭から1文字ずつ読み込んだ途中の文字列で QR コードを描き、最後に完成形を描く。
   // 長い文字列はコマ数を抑えるため、1コマで複数文字進める。
@@ -490,8 +623,14 @@
   // アニメーションは貼り付け時（とサイズ等の変更時）だけ。手で打っているときは即座に完成形を描く
   genInput.addEventListener('input', (e) => {
     clearTimeout(genTimer);
+    page = 0; // 文字列が変わったら1枚目から
     if (e.inputType === 'insertFromPaste') generateQR(genAnimate.checked);
     else genTimer = setTimeout(generateQR, 150);
+  });
+  genSplit.addEventListener('change', () => { page = 0; persistSettings(); generateQR(); });
+  genChunk.addEventListener('input', () => {
+    clearTimeout(genTimer);
+    genTimer = setTimeout(() => { page = 0; persistSettings(); generateQR(); }, 300);
   });
   genSize.addEventListener('change', () => generateQR(genAnimateOnOption.checked));
   genLevel.addEventListener('change', () => generateQR(genAnimateOnOption.checked));
@@ -509,7 +648,7 @@
     finishAnimation();
     const a = document.createElement('a');
     a.href = genCanvas.toDataURL('image/png');
-    a.download = 'qrcode.png';
+    a.download = parts.length > 1 ? `qrcode-${page + 1}of${parts.length}.png` : 'qrcode.png';
     a.click();
   });
   $('genCopy').addEventListener('click', async () => {
