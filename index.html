@@ -20,8 +20,43 @@
     margin: 0; background: var(--bg); color: var(--fg);
     font-family: system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Yu Gothic UI", sans-serif;
   }
-  main { max-width: 720px; margin: 0 auto; padding: 16px; }
+  /* PC: 左に読み込み、右に生成を並べる */
+  .app-header { max-width: 1280px; margin: 0 auto; padding: 16px 16px 0; }
   h1 { font-size: 1.3rem; margin: 8px 0 16px; }
+  .panes {
+    max-width: 1280px; margin: 0 auto; padding: 0 16px 16px;
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start;
+  }
+  .tabs { display: none; }
+  /* スマホ: 2つのペインを横に並べ、横スワイプで切り替える（各ペインは縦に個別スクロール） */
+  @media (max-width: 899px) {
+    body { height: 100vh; height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
+    .app-header { width: 100%; padding: 8px 16px; border-bottom: 1px solid var(--border); }
+    h1 { font-size: 1.1rem; margin: 4px 0 8px; }
+    .tabs {
+      display: flex; position: relative; padding: 3px; border-radius: 10px;
+      background: var(--card); border: 1px solid var(--border);
+    }
+    .tabs button {
+      flex: 1; position: relative; z-index: 1; border: none; background: transparent;
+      padding: 6px 12px; color: var(--muted); transition: color .2s;
+    }
+    .tabs button[aria-pressed="true"] { color: var(--accent-fg); }
+    .tab-indicator {
+      position: absolute; top: 3px; bottom: 3px; left: 3px; width: calc(50% - 3px);
+      border-radius: 8px; background: var(--accent);
+    }
+    .panes {
+      flex: 1; min-height: 0; max-width: none; width: 100%; padding: 0; gap: 0;
+      display: flex; overflow-x: auto; overflow-y: hidden;
+      scroll-snap-type: x mandatory; overscroll-behavior-x: contain; scrollbar-width: none;
+    }
+    .panes::-webkit-scrollbar { display: none; }
+    .pane {
+      flex: 0 0 100%; min-width: 0; overflow-y: auto; overscroll-behavior-y: contain;
+      scroll-snap-align: start; scroll-snap-stop: always; padding: 12px 16px 16px;
+    }
+  }
   .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 16px; }
   .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
   select, button {
@@ -80,9 +115,16 @@
 </style>
 </head>
 <body>
-<main>
+<header class="app-header">
   <h1>QR Reader on PC</h1>
-
+  <nav class="tabs" id="tabs" aria-label="画面の切り替え">
+    <span class="tab-indicator" id="tabIndicator"></span>
+    <button type="button" data-pane="0" aria-controls="paneRead" aria-pressed="true">読み込み</button>
+    <button type="button" data-pane="1" aria-controls="paneGen" aria-pressed="false">生成</button>
+  </nav>
+</header>
+<main class="panes" id="panes">
+ <div class="pane" id="paneRead" aria-label="読み込み">
   <section class="card">
     <div class="controls">
       <button id="toggle" class="primary">カメラを起動</button>
@@ -115,6 +157,19 @@
     </div>
   </section>
 
+  <section class="card">
+    <h2>履歴 <button id="clearHistory">履歴を消去</button></h2>
+    <div class="history-tools" id="historyTools" hidden>
+      <button id="joinCopy" class="primary" disabled>選択した項目を結合してコピー</button>
+      <button id="selectAll">すべて選択</button>
+      <span class="hint">読み取った順に結合します（Shift+クリックで範囲選択）</span>
+    </div>
+    <ul class="history" id="history"></ul>
+    <p class="hint" id="historyEmpty">まだ履歴はありません</p>
+  </section>
+ </div>
+
+ <div class="pane" id="paneGen" aria-label="生成">
   <section class="card">
     <h2>QRコードを作る</h2>
     <textarea id="genInput" rows="3" placeholder="QRコードにしたい文字列やURLを入力"></textarea>
@@ -158,17 +213,7 @@
     </div>
     <p class="hint" id="genMessage"></p>
   </section>
-
-  <section class="card">
-    <h2>履歴 <button id="clearHistory">履歴を消去</button></h2>
-    <div class="history-tools" id="historyTools" hidden>
-      <button id="joinCopy" class="primary" disabled>選択した項目を結合してコピー</button>
-      <button id="selectAll">すべて選択</button>
-      <span class="hint">読み取った順に結合します（Shift+クリックで範囲選択）</span>
-    </div>
-    <ul class="history" id="history"></ul>
-    <p class="hint" id="historyEmpty">まだ履歴はありません</p>
-  </section>
+ </div>
 </main>
 
 <script src="vendor/jsQR.js"></script>
@@ -208,16 +253,47 @@
   if (typeof settings.genAnimateOnOption === 'boolean') genAnimateOnOption.checked = settings.genAnimateOnOption;
   if (typeof settings.genSplit === 'boolean') genSplit.checked = settings.genSplit;
   if (Number.isInteger(settings.genChunk) && settings.genChunk > 0) genChunk.value = settings.genChunk;
+  let activePane = settings.pane === 1 ? 1 : 0; // スマホで表示中の画面（0: 読み込み, 1: 生成）
   const persistSettings = () => saveJSON(SETTINGS_KEY, {
     autoCopy: autoCopy.checked, mirror: mirror.checked,
     genAnimate: genAnimate.checked, genAnimateOnOption: genAnimateOnOption.checked,
     genSplit: genSplit.checked, genChunk: chunkSize(),
     deviceId: cameraSel.value || settings.deviceId,
+    pane: activePane,
   });
   autoCopy.addEventListener('change', persistSettings);
   mirror.addEventListener('change', () => { applyMirror(); persistSettings(); });
   function applyMirror() { video.style.transform = mirror.checked ? 'scaleX(-1)' : ''; }
   applyMirror();
+
+  // ---- 画面の切り替え（スマホ: 横スワイプ / 上のボタン。PC では左右に並ぶので使わない） ----
+  const panes = $('panes'), tabIndicator = $('tabIndicator');
+  const tabButtons = [...document.querySelectorAll('#tabs button')];
+  function syncTabs() {
+    const w = panes.clientWidth;
+    const progress = w ? Math.min(1, Math.max(0, panes.scrollLeft / w)) : 0;
+    tabIndicator.style.transform = `translateX(${progress * 100}%)`;
+    const next = Math.round(progress);
+    if (panes.scrollWidth <= w + 1 || next === activePane) return; // PC 表示中は横スクロールしない
+    activePane = next;
+    tabButtons.forEach((b, i) => b.setAttribute('aria-pressed', String(i === activePane)));
+    persistSettings();
+  }
+  let syncFrame = 0;
+  panes.addEventListener('scroll', () => {
+    cancelAnimationFrame(syncFrame);
+    syncFrame = requestAnimationFrame(syncTabs);
+  }, { passive: true });
+  tabButtons.forEach((b, i) => b.addEventListener('click', () => {
+    panes.scrollTo({ left: i * panes.clientWidth, behavior: 'smooth' });
+  }));
+  // 画面の回転などで幅が変わっても、表示中の画面がずれないようにする
+  function alignPane() {
+    panes.scrollLeft = activePane * panes.clientWidth;
+    tabIndicator.style.transform = `translateX(${activePane * 100}%)`;
+    tabButtons.forEach((b, i) => b.setAttribute('aria-pressed', String(i === activePane)));
+  }
+  new ResizeObserver(alignPane).observe(panes);
 
   // ---- デコーダ（BarcodeDetector があれば優先、なければ jsQR） ----
   async function initDetector() {
