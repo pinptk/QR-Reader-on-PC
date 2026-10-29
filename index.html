@@ -48,7 +48,7 @@
     }
     .panes {
       flex: 1; min-height: 0; max-width: none; width: 100%; padding: 0; gap: 0;
-      display: flex; overflow-x: auto; overflow-y: hidden;
+      display: flex; align-items: stretch; overflow-x: auto; overflow-y: hidden;
       scroll-snap-type: x mandatory; overscroll-behavior-x: contain; scrollbar-width: none;
     }
     .panes::-webkit-scrollbar { display: none; }
@@ -74,7 +74,12 @@
   }
   .viewport video { width: 100%; height: 100%; object-fit: contain; }
   .viewport .placeholder { position: absolute; color: #aaa; text-align: center; padding: 16px; font-size: .95rem; }
-  .viewport.hit { outline: 4px solid var(--ok); outline-offset: -4px; }
+  /* 読み取り成功時の緑枠。outline だとスマホではカメラ映像の下に隠れるので、映像の上に重ねる */
+  .viewport::after {
+    content: ""; position: absolute; inset: 0; z-index: 1; pointer-events: none;
+    border: 4px solid var(--ok); border-radius: inherit; opacity: 0; transition: opacity .3s;
+  }
+  .viewport.hit::after { opacity: 1; transition: none; }
   #status { font-size: .85rem; color: var(--muted); margin-top: 8px; min-height: 1.2em; }
   .result-text {
     font-family: ui-monospace, Consolas, monospace; white-space: pre-wrap; word-break: break-all;
@@ -234,10 +239,9 @@
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   const HISTORY_KEY = 'qr-reader-history';
   const SETTINGS_KEY = 'qr-reader-settings';
-  const DUP_WINDOW_MS = 3000;
 
   let stream = null, scanTimer = null, detector = null;
-  let lastText = '', lastTime = 0, currentText = '';
+  let lastText = '', currentText = ''; // lastText: 直前に読み取った内容
 
   // ---- 設定の保存（失敗しても動作に影響しない） ----
   function loadJSON(key, fallback) {
@@ -258,7 +262,7 @@
     autoCopy: autoCopy.checked, mirror: mirror.checked,
     genAnimate: genAnimate.checked, genAnimateOnOption: genAnimateOnOption.checked,
     genSplit: genSplit.checked, genChunk: chunkSize(),
-    deviceId: cameraSel.value || settings.deviceId,
+    cameraId: settings.cameraId, // 一覧から手で選んだカメラだけ覚える
     pane: activePane,
   });
   autoCopy.addEventListener('change', persistSettings);
@@ -339,9 +343,10 @@
       setStatus('このブラウザではカメラを使えません。Chrome / Edge / Firefox の最新版でお試しください。');
       return;
     }
-    const video_ = deviceId
-      ? { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
-      : { width: { ideal: 1280 }, height: { ideal: 720 } };
+    // カメラを選んでいなければ、スマホ・タブレットでは背面カメラを使う
+    const video_ = { width: { ideal: 1280 }, height: { ideal: 720 } };
+    if (deviceId) video_.deviceId = { exact: deviceId };
+    else if (matchMedia('(pointer: coarse)').matches) video_.facingMode = { ideal: 'environment' };
     try {
       stream = await navigator.mediaDevices.getUserMedia({ video: video_, audio: false });
     } catch (e) {
@@ -392,8 +397,8 @@
     if (stream) scanTimer = setTimeout(scanLoop, 150);
   }
 
-  toggleBtn.addEventListener('click', () => stream ? stopCamera() : startCamera(settings.deviceId));
-  cameraSel.addEventListener('change', () => { settings.deviceId = cameraSel.value; startCamera(cameraSel.value); });
+  toggleBtn.addEventListener('click', () => stream ? stopCamera() : startCamera(settings.cameraId));
+  cameraSel.addEventListener('change', () => { settings.cameraId = cameraSel.value; startCamera(cameraSel.value); });
 
   // ---- 結果の処理 ----
   function isWebUrl(text) {
@@ -404,9 +409,9 @@
   }
 
   function handleResult(text) {
-    const now = Date.now();
-    if (text === lastText && now - lastTime < DUP_WINDOW_MS) return;
-    lastText = text; lastTime = now;
+    // 直前と同じ QR コードは、時間が空いても読み取ったことにしない（枠も光らせず履歴にも残さない）
+    if (text === lastText) return;
+    lastText = text;
     showResult(text);
     addHistory(text);
     viewport.classList.add('hit');
@@ -545,6 +550,7 @@
       const bmp = await createImageBitmap(file);
       const scale = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
       const text = await decodeSource(bmp, Math.round(bmp.width * scale), Math.round(bmp.height * scale));
+      // 画像は自分で選んで読ませるものなので、直前と同じ内容でも読み取ったことにする
       if (text) { lastText = ''; handleResult(text); setStatus('画像から読み取りました'); }
       else setStatus('画像からQRコードが見つかりませんでした');
     } catch (e) {
